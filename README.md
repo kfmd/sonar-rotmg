@@ -1,12 +1,14 @@
 # Sonar
 
-> **Sonar requires [Npcap](https://npcap.com/) to work.** It is the free Windows driver that lets a program read network traffic, and no packet sniffer on Windows works without it. Its licence forbids anyone bundling it, so it is a separate install — the Sonar installer checks for it and points you at it, but you can get it out of the way [first](#install).
+> **On Windows, Sonar requires [Npcap](https://npcap.com/).** It is the free Windows driver that lets a program read network traffic, and no packet sniffer on Windows works without it. Its licence forbids anyone bundling it, so it is a separate install — the Sonar installer checks for it and points you at it, but you can get it out of the way [first](#install). The macOS preview uses Apple's system `libpcap` and BPF devices instead.
 
 **A damage tracker for Realm of the Mad God that tells you what actually happened in the run.**
 
 Who did the damage. To which boss. With what gear. How much of it was you.
 
 [**⬇ Download the latest release**](https://github.com/JustAutomate-AI/sonar-rotmg/releases/latest) — get `Sonar-<version>-setup.msi`, not the green "Code" button. It installs for your user only, so Windows never asks for administrator rights.
+
+> **macOS Apple Silicon preview port:** this source tree now includes an initial macOS implementation (packet capture, Exalt window/minimap discovery, global input observation and overlay click-through). It is a developer port, not yet a verified release. See [MACOS_PORT.md](MACOS_PORT.md) for build steps, permissions and current test limitations.
 
 ![The Live page during a run of Oryx's Sanctuary](docs/screenshots/live.png)
 

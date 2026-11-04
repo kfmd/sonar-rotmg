@@ -26,16 +26,61 @@ public class AppWindow {
         AppWindow.data = data;
     }
 
-    /** Builds the Sonar shell and puts it in the window. */
+    /** Builds the Sonar shell and puts it in the window. Swing components are created on the EDT. */
     public void create() {
-        // the look is already installed by Sonar.load(), before anything is painted
-        SonarShell shell = new SonarShell(data);
+        // Chat pings only load preferences and a local block list; keep that I/O off the EDT.
         sonar.ChatPings.start(data);
-        makeFrame(shell);
+        Runnable createUi = () -> {
+            System.out.println("[window] EDT UI construction started");
+            SonarShell shell = new SonarShell(data);
+            System.out.println("[window] SonarShell constructed");
+            makeFrame(shell);
+        };
+        if (SwingUtilities.isEventDispatchThread()) {
+            createUi.run();
+            return;
+        }
+
+        // This is a standalone Swing application, not an SWT/LWJGL embedded app.
+        // Do not launch the JVM with -XstartOnFirstThread: that option puts macOS
+        // AWT into embedded mode and disables AWT's own AppKit event loop unless
+        // another native toolkit starts it. With the normal macOS Java launcher,
+        // invokeAndWait is safe and ensures the frame is fully created before
+        // Sonar continues bootstrapping its controllers and saved data.
+        try {
+            SwingUtilities.invokeAndWait(createUi);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while creating the Sonar window", e);
+        } catch (java.lang.reflect.InvocationTargetException e) {
+            Throwable cause = e.getCause() == null ? e : e.getCause();
+            if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+            if (cause instanceof Error) throw (Error) cause;
+            throw new IllegalStateException("Failed while creating the Sonar window", cause);
+        }
+    }
+
+    private static void logFrameState(String stage) {
+        JFrame current = frame;
+        if (current == null) {
+            System.out.println("[window] " + stage + ": JFrame is null");
+            return;
+        }
+        Rectangle bounds = current.getBounds();
+        GraphicsConfiguration gc = current.getGraphicsConfiguration();
+        System.out.println("[window] " + stage
+                + ": visible=" + current.isVisible()
+                + ", showing=" + current.isShowing()
+                + ", displayable=" + current.isDisplayable()
+                + ", bounds=" + bounds
+                + ", extendedState=" + current.getExtendedState()
+                + ", graphicsConfiguration=" + (gc == null ? "null" : gc.getDevice().getIDstring()));
     }
 
     private void makeFrame(SonarShell shell) {
+        System.out.println("[window] constructing JFrame");
         frame = new JFrame("Sonar " + SonarShell.version());
+        logFrameState("JFrame constructed");
         // Every size, not one. A lone 256px image leaves Windows to scale it down to 24 for the
         // taskbar itself, and it does that poorly - the mark came out soft however crisply it was
         // drawn. Given the set, Windows picks the exact match and scales nothing.
@@ -57,15 +102,43 @@ public class AppWindow {
             }
         }
         frame.setSize(windowWidth, windowHeight);
+        logFrameState("after initial size");
         SonarShell.sizeFrame(frame);
+        logFrameState("after SonarShell.sizeFrame");
         placeFrame();
+        logFrameState("after placeFrame");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         frame.setContentPane(shell);
+        logFrameState("after setContentPane");
         // a picture taken for a page or a test must never take the keyboard from a game being played
         if (System.getProperty("sonar.shot") != null) frame.setAutoRequestFocus(false);
+        frame.addWindowListener(new java.awt.event.WindowAdapter() {
+            @Override public void windowOpened(java.awt.event.WindowEvent e) {
+                logFrameState("windowOpened event");
+            }
+            @Override public void windowClosed(java.awt.event.WindowEvent e) {
+                logFrameState("windowClosed event");
+            }
+        });
+        System.out.println("[window] calling setVisible(true)");
         frame.setVisible(true);
-        // after the window is up, so the dialogs have something to sit on
+        frame.validate();
+        frame.repaint();
+        logFrameState("immediately after setVisible");
+        // macOS can defer native window realization until the next AppKit/EDT turn.
         javax.swing.SwingUtilities.invokeLater(() -> {
+            logFrameState("next EDT turn");
+            if (frame != null && (!frame.isShowing() || frame.getWidth() < 100 || frame.getHeight() < 100)) {
+                System.err.println("[window] WARNING: Sonar frame did not become a normal visible window; retrying size/show.");
+                frame.setSize(Math.max(900, frame.getWidth()), Math.max(650, frame.getHeight()));
+                frame.setLocationRelativeTo(null);
+                frame.setVisible(true);
+                frame.toFront();
+                frame.requestFocus();
+                logFrameState("after visibility retry");
+            } else if (frame != null) {
+                frame.toFront();
+            }
             // no dialog of its own: it checks the Start menu on a thread and says nothing
             Shortcuts.ensure();
             FirstRun.checkNpcap(frame);

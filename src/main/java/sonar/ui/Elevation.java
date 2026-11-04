@@ -62,6 +62,7 @@ final class Elevation {
 
     /** Whether Sonar runs elevated; null when it cannot be read. */
     static Boolean sonarElevated() {
+        if (MacOSNative.isMac()) return null;
         try {
             return elevated(Kernel32.INSTANCE.GetCurrentProcess());
         } catch (Throwable notWindows) {
@@ -71,6 +72,7 @@ final class Elevation {
 
     /** Whether the game's window belongs to an elevated process; null with no game or no answer. */
     static Boolean gameElevated() {
+        if (MacOSNative.isMac()) return null;
         try {
             com.sun.jna.Pointer hwnd = User32.INSTANCE.FindWindowW(null, "RotMGExalt");
             if (hwnd == null) return null;

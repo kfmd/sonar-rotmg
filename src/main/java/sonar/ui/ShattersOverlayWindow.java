@@ -2652,6 +2652,7 @@ class ShattersOverlayWindow extends JWindow {
      * the overlay's zoom and left the two out of register.
      */
     private boolean gameItselfInFront() {
+        if (MacOSNative.isMac()) return MacOSNative.gameInFront();
         try {
             com.sun.jna.Pointer front = User32.INSTANCE.GetForegroundWindow();
             com.sun.jna.Pointer game = front == null ? null : User32.INSTANCE.FindWindowW(null, GAME_WINDOW);
@@ -2662,6 +2663,11 @@ class ShattersOverlayWindow extends JWindow {
     }
 
     private boolean gameIsInFront() {
+        if (MacOSNative.isMac()) {
+            java.awt.Window active = javax.swing.FocusManager.getCurrentManager().getActiveWindow();
+            if (active != null && active.getClass().getName().toLowerCase(java.util.Locale.ROOT).contains("sonar")) return true;
+            return MacOSNative.gameInFront();
+        }
         try {
             com.sun.jna.Pointer front = User32.INSTANCE.GetForegroundWindow();
             if (front == null) return false;
@@ -2732,6 +2738,17 @@ class ShattersOverlayWindow extends JWindow {
     private boolean plusWasDown, minusWasDown;
 
     private static boolean down(int vk) {
+        if (MacOSNative.isMac()) {
+            MacInputMonitor.start();
+            if (vk == VK_LBUTTON) return MacInputMonitor.mouseButtonDown(0);
+            if (vk == VK_CONTROL) return MacInputMonitor.keyDown(59);
+            if (vk == VK_SHIFT) return MacInputMonitor.keyDown(56);
+            if (vk == VK_OEM_PLUS) return MacInputMonitor.keyDown(24);
+            if (vk == VK_OEM_MINUS) return MacInputMonitor.keyDown(27);
+            if (vk == VK_ADD) return MacInputMonitor.keyDown(69);
+            if (vk == VK_SUBTRACT) return MacInputMonitor.keyDown(78);
+            return MacInputMonitor.keyDown(vk);
+        }
         try {
             return (User32.INSTANCE.GetAsyncKeyState(vk) & 0x8000) != 0;
         } catch (Throwable e) {
@@ -2999,8 +3016,24 @@ class ShattersOverlayWindow extends JWindow {
         return gameBox;
     }
 
+    private static int macKeyCode(int vk) {
+        switch (vk) {
+            case VK_CONTROL: return 59;
+            case VK_SHIFT: return 56;
+            case VK_OEM_PLUS: return 24;
+            case VK_OEM_MINUS: return 27;
+            case VK_ADD: return 69;
+            case VK_SUBTRACT: return 78;
+            default: return vk >= 0x41 && vk <= 0x5A ? GameKeys.macCodeOf(vk - 0x41 + 97) : vk;
+        }
+    }
+
     /** True if the key went down since the previous call, even if it is already back up. */
     private static boolean pressedSinceLastLook(int vk) {
+        if (MacOSNative.isMac()) {
+            MacInputMonitor.start();
+            return vk == VK_LBUTTON ? MacInputMonitor.wasMousePressed(0) : MacInputMonitor.wasPressed(macKeyCode(vk));
+        }
         try {
             return (User32.INSTANCE.GetAsyncKeyState(vk) & 0x0001) != 0;
         } catch (Throwable e) {
@@ -3076,6 +3109,12 @@ class ShattersOverlayWindow extends JWindow {
      * it is on.
      */
     private void setHiddenFromCapture(boolean hidden) {
+        if (MacOSNative.isMac()) {
+            // Mac captureGameRect photographs the ROTMG window itself, not the desktop, so
+            // Sonar is naturally excluded from the pixels used to locate the minimap.
+            captureHidden = false;
+            return;
+        }
         try {
             long id = com.sun.jna.Native.getWindowID(this);
             if (id == 0) {
@@ -3107,6 +3146,11 @@ class ShattersOverlayWindow extends JWindow {
      * alternative is a person clicking a player over and over and nothing happening.
      */
     private void setClickThrough(boolean through) {
+        if (MacOSNative.isMac()) {
+            clickThroughOn = MacOSNative.setClickThrough(this, through);
+            styleTrouble = clickThroughOn == through ? "" : "macOS did not confirm NSWindow click-through; check Java runtime permissions/module access";
+            return;
+        }
         try {
             long id = com.sun.jna.Native.getWindowID(this);
             if (id == 0) {

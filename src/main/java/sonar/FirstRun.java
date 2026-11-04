@@ -48,7 +48,10 @@ public final class FirstRun {
      * startup is better than letting Start sniffer fail later with no explanation.
      */
     public static void checkNpcap(Component parent) {
-        if (automated() || npcapInstalled()) return;
+        // macOS uses the system libpcap/BPF stack, not the Windows Npcap driver.
+        // Its ChmodBPF permission is checked when the user starts packet capture.
+        if (automated() || System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("mac")
+                || npcapInstalled()) return;
         int choice = SonarDialog.ask(parent, "Npcap is not installed",
                 "Sonar reads the game's network traffic, which needs the Npcap driver.\n\n"
                         + "Everything else works without it, but Start sniffer will not.\n"

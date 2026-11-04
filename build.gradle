@@ -42,6 +42,8 @@ dependencies {
     // packet capture, formerly pulled in through the separate RealmShark jar
     implementation 'com.ardikars.pcap:pcap-spi:1.4.2'
     implementation 'com.ardikars.pcap:pcap-jdk7:1.4.2'
+    // macOS window, capture and Quartz input adapters use JNA directly.
+    implementation 'net.java.dev.jna:jna:5.13.0'
     implementation 'com.google.code.gson:gson:2.9.1'
     implementation 'com.google.flatbuffers:flatbuffers-java:23.5.26'
     implementation 'com.github.weisj:darklaf-core:3.0.2'

@@ -154,8 +154,13 @@ final class MinimapLocator {
     }
 
     private static BufferedImage capture(Rectangle window) {
+        if (MacOSNative.isMac()) {
+            // Capture the Exalt window itself, not the desktop. The Sonar overlay is therefore
+            // excluded even while it is drawn over the minimap, and clicks remain available.
+            return MacOSNative.captureGameRect(window);
+        }
         try {
-            // only ever the game's own window, never the screen
+            // On Windows, the overlay is hidden from capture only for this short measurement.
             return new java.awt.Robot().createScreenCapture(window);
         } catch (Throwable noRobot) {
             return null;
@@ -177,6 +182,10 @@ final class MinimapLocator {
     }
 
     private static Rectangle windowRect() {
+        if (MacOSNative.isMac()) {
+            MacOSNative.GameWindow game = MacOSNative.gameWindow();
+            return game == null ? null : new Rectangle(game.bounds);
+        }
         try {
             com.sun.jna.Pointer hwnd = User32.INSTANCE.FindWindowW(null, WINDOW);
             if (hwnd == null) return null;

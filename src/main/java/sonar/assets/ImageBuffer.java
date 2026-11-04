@@ -16,8 +16,9 @@ public class ImageBuffer {
     private static final HashMap<Long, ImageIcon> outlinedImages = new HashMap<>();
     private static HashMap<Integer, BufferedImage> images = new HashMap<>();
     private static HashMap<Integer, float[]> colors = new HashMap<>();
-//    private static final SpriteJson spriteJson = new SpriteJson();
     private static final SpriteFlatBuffer spriteFlatBuffer = new SpriteFlatBuffer();
+    private static SpriteJson spriteJson;
+    private static boolean jsonSpritesLoaded = false;
     private static BufferedImage emptyImg;
 
     private static String[] spriteSheets = {"assets/sprites/groundTiles.png", "assets/sprites/characters.png", "assets/sprites/characters_masks.png", "assets/sprites/mapObjects.png"};
@@ -42,7 +43,7 @@ public class ImageBuffer {
         String name = IdToAsset.getObjectTextureName(id, 0);
         if (name == null) return emptyImage();
         int index = IdToAsset.getObjectTextureIndex(id, 0);
-        int[] spriteData = spriteFlatBuffer.getSpriteData(name, index);
+        int[] spriteData = spriteData(name, index);
         if (spriteData == null) return emptyImage();
         BufferedImage sprite = getSprite(spriteData);
         images.put(id, sprite);
@@ -62,9 +63,35 @@ public class ImageBuffer {
         String name = IdToAsset.getTileTextureName(id, 0);
         if (name == null) return null;
         int index = IdToAsset.getTileTextureIndex(id, 0);
-        float[] color = spriteFlatBuffer.getSpriteColor(name, index);
+        float[] color = spriteColor(name, index);
         colors.put(id, color);
         return color;
+    }
+
+    /**
+     * Use the current Exalt Extractor JSON metadata on macOS when present; otherwise retain
+     * Sonar's original FlatBuffer metadata path for existing Windows installations.
+     */
+    private static boolean hasJsonSpriteMetadata() {
+        File json = sonar.DataDir.file("assets/json/spritesheet.json");
+        if (!json.isFile()) return false;
+        if (!jsonSpritesLoaded) {
+            // The first construction triggers SpriteJson's static loader. On a later
+            // in-app extraction, AssetExtractor explicitly reloads the JSON first.
+            spriteJson = new SpriteJson();
+            jsonSpritesLoaded = true;
+        }
+        return true;
+    }
+
+    private static int[] spriteData(String name, int index) {
+        if (hasJsonSpriteMetadata()) return spriteJson.getSpriteData(name, index);
+        return spriteFlatBuffer.getSpriteData(name, index);
+    }
+
+    private static float[] spriteColor(String name, int index) {
+        if (hasJsonSpriteMetadata()) return spriteJson.getSpriteColorComponents(name, index);
+        return spriteFlatBuffer.getSpriteColor(name, index);
     }
 
     /**
@@ -88,6 +115,7 @@ public class ImageBuffer {
         images.clear();
         colors.clear();
         bigImages = new BufferedImage[4];
+        jsonSpritesLoaded = false;
     }
 
     /**

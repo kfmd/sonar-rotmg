@@ -113,6 +113,19 @@ final class MouseWheelWatch {
     /** Starts watching, or replaces who is told. Safe to call when it is already running. */
     static synchronized void start(Listener who) {
         listener = who;
+        if (MacOSNative.isMac()) {
+            MacInputMonitor.listen(new MacInputMonitor.Listener() {
+                @Override public void wheel(int x, int y, int notches) {
+                    Listener current = listener;
+                    if (current != null) current.wheel(x, y, notches);
+                }
+                @Override public void clicked(int x, int y) {
+                    Listener current = listener;
+                    if (current != null) current.clicked(x, y);
+                }
+            });
+            return;
+        }
         if (thread != null && thread.isAlive()) {
             if (hook != null) return;   // running, and now telling the new listener
             // stopped a moment ago and still on its way out: give it a moment, since a hook
@@ -224,6 +237,11 @@ final class MouseWheelWatch {
 
     static synchronized void stop() {
         listener = null;
+        if (MacOSNative.isMac()) {
+            MacInputMonitor.stopListening();
+            events.clear();
+            return;
+        }
         events.clear();
         com.sun.jna.Pointer h = hook;
         hook = null;

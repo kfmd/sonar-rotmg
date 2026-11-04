@@ -90,6 +90,16 @@ final class MinimapPlacement {
 
     /** The game's picture, or null when it is not open, minimised, or this is not Windows. */
     static Client client() {
+        if (MacOSNative.isMac()) {
+            MacOSNative.GameWindow game = MacOSNative.gameWindow();
+            if (game == null) return null;
+            Rectangle logical = new Rectangle(game.bounds);
+            double scale = scaleAt(logical.x + logical.width / 2, logical.y + logical.height / 2);
+            Rectangle physical = new Rectangle((int) Math.round(logical.x * scale),
+                    (int) Math.round(logical.y * scale), (int) Math.round(logical.width * scale),
+                    (int) Math.round(logical.height * scale));
+            return new Client(physical, logical, scale);
+        }
         try {
             com.sun.jna.Pointer hwnd = User32.INSTANCE.FindWindowW(null, WINDOW);
             if (hwnd == null || User32.INSTANCE.IsIconic(hwnd)) return null;
@@ -109,6 +119,7 @@ final class MinimapPlacement {
 
     /** Whether the game's own window is the one in front. */
     static boolean gameInFront() {
+        if (MacOSNative.isMac()) return MacOSNative.gameInFront();
         try {
             com.sun.jna.Pointer game = User32.INSTANCE.FindWindowW(null, WINDOW);
             com.sun.jna.Pointer front = User32.INSTANCE.GetForegroundWindow();
@@ -152,6 +163,7 @@ final class MinimapPlacement {
      */
     static synchronized BufferedImage capture(Rectangle logical) {
         if (logical == null || logical.width <= 0 || logical.height <= 0) return null;
+        if (MacOSNative.isMac()) return MacOSNative.captureGameRect(logical);
         try {
             if (robot == null) robot = new java.awt.Robot();
             java.awt.image.MultiResolutionImage multi = robot.createMultiResolutionScreenCapture(logical);

@@ -28,6 +28,8 @@ public final class DataDir {
             return new File("").getAbsoluteFile();
         }
         String path = set.trim();
+        if (path.equals("~")) path = System.getProperty("user.home");
+        else if (path.startsWith("~/") || path.startsWith("~\\")) path = System.getProperty("user.home") + path.substring(1);
         // the packaged launcher passes the token rather than a path it cannot expand itself
         // The installed build asks for one of these rather than a path it cannot expand
         // itself. %APPDATA% is what the Windows installer passes: the program it installs

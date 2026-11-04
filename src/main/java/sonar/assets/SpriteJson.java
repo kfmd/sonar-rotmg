@@ -37,6 +37,7 @@ public class SpriteJson implements JsonDeserializer<SpriteJson> {
             notLoaded = true;
             return;
         }
+        notLoaded = false;
         if (sprites != null) sprites.clear();
         if (animatedSprites != null) animatedSprites.clear();
         GsonBuilder builder = new GsonBuilder();
@@ -76,27 +77,36 @@ public class SpriteJson implements JsonDeserializer<SpriteJson> {
      * @return Integer
      */
     public int[] getSpriteData(String name, int index) {
-        if(notLoaded) return null;
+        if (notLoaded || sprites == null) return null;
         HashMap<Integer, Sprite> list = sprites.get(name);
-        if (list == null) {
-            list = animatedSprites.get(name);
-        }
+        if (list == null && animatedSprites != null) list = animatedSprites.get(name);
+        if (list == null) return null;
         Sprite sprite = list.get(index);
+        if (sprite == null || sprite.position == null) return null;
         return new int[]{sprite.position.x, sprite.position.y, sprite.position.w, sprite.position.h, sprite.aId};
     }
 
     /**
-     * Retrieves sprite most common color.
-     *
-     * @param name  Name of the sprite group.
-     * @param index Index of the sprite in the group.
-     * @return Integer
+     * Retrieves a sprite's most-common colour in the source JSON's 0..255 range.
+     * ImageBuffer/MinimapView accept both 0..1 and 0..255 components.
      */
-    public int getSpriteColor(String name, int index) {
-        if(notLoaded) return -1;
+    public float[] getSpriteColorComponents(String name, int index) {
+        if (notLoaded || sprites == null) return null;
         HashMap<Integer, Sprite> list = sprites.get(name);
+        if (list == null && animatedSprites != null) list = animatedSprites.get(name);
+        if (list == null) return null;
         Sprite sprite = list.get(index);
-        return sprite.mostCommonColor.asInt();
+        if (sprite == null || sprite.mostCommonColor == null) return null;
+        return new float[]{sprite.mostCommonColor.r, sprite.mostCommonColor.g,
+                sprite.mostCommonColor.b, sprite.mostCommonColor.a};
+    }
+
+    /** Legacy packed ARGB accessor retained for callers outside ImageBuffer. */
+    public int getSpriteColor(String name, int index) {
+        float[] c = getSpriteColorComponents(name, index);
+        if (c == null) return -1;
+        return (((int) c[3] & 0xff) << 24) | (((int) c[0] & 0xff) << 16)
+                | (((int) c[1] & 0xff) << 8) | ((int) c[2] & 0xff);
     }
 
     /**

@@ -1189,6 +1189,10 @@ final class DamageMeterWindow extends JWindow {
 
     /** Whether a key is held down, whichever window has the keyboard. */
     static boolean keyDown(int vk) {
+        if (MacOSNative.isMac()) {
+            MacInputMonitor.start();
+            return vk != 0 && MacInputMonitor.keyDown(vk);
+        }
         try {
             return vk != 0 && (User32.INSTANCE.GetAsyncKeyState(vk) & 0x8000) != 0;
         } catch (Throwable notWindows) {
@@ -1198,6 +1202,10 @@ final class DamageMeterWindow extends JWindow {
 
     /** Lets clicks fall through a window to the game underneath. */
     static void clickThrough(Window w) {
+        if (MacOSNative.isMac()) {
+            MacOSNative.setClickThrough(w, true);
+            return;
+        }
         try {
             long id = com.sun.jna.Native.getWindowID(w);
             if (id == 0) return;
@@ -1211,6 +1219,10 @@ final class DamageMeterWindow extends JWindow {
 
     /** Whether a mouse button is held down anywhere on screen, the game included. */
     static boolean mouseDown() {
+        if (MacOSNative.isMac()) {
+            MacInputMonitor.start();
+            return MacInputMonitor.mouseDown();
+        }
         try {
             return (User32.INSTANCE.GetAsyncKeyState(0x01) & 0x8000) != 0 || (User32.INSTANCE.GetAsyncKeyState(0x02) & 0x8000) != 0;
         } catch (Throwable notWindows) {
@@ -1222,6 +1234,10 @@ final class DamageMeterWindow extends JWindow {
 
     /** Marks a window never to be activated by a click, so clicking it leaves the game in front. */
     static void neverActivate(Window w) {
+        if (MacOSNative.isMac()) {
+            if (w != null) w.setFocusableWindowState(false);
+            return;
+        }
         try {
             long id = com.sun.jna.Native.getWindowID(w);
             if (id == 0) return;
@@ -1235,6 +1251,11 @@ final class DamageMeterWindow extends JWindow {
 
     /** WS_EX_TRANSPARENT only; the window is already layered by Java, as the overlay's is. */
     private void applyClickThrough() {
+        if (MacOSNative.isMac()) {
+            boolean through = !adjusting;
+            MacOSNative.setClickThrough(this, through);
+            return;
+        }
         try {
             long id = com.sun.jna.Native.getWindowID(this);
             if (id == 0) return;

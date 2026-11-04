@@ -120,10 +120,16 @@ public class Sonar {
             // "Realm Shark Asset Extractor" window that could appear over the game mid-session. Extraction itself
             // is fast and purely local (no reason to ask first), so there is nothing meaningful lost by not asking.
             AssetExtractor.extractHeadless(Version.ASSET_FORMAT);
+            System.out.println("[startup] Creating GameData");
             GameData data = new GameData();
+            System.out.println("[startup] Loading controllers");
             loadControllers(data);
+            System.out.println("[startup] Creating main window");
             new AppWindow(data).create();
+            System.out.println("[startup] Main window creation returned");
+            System.out.println("[startup] Loading saved user data");
             bootload(data);
+            System.out.println("[startup] Startup sequence completed");
         } catch (OutOfMemoryError | StackOverflowError e) {
             OutOfMemoryDialog.crashDialog();
             System.exit(0);
@@ -148,15 +154,27 @@ public class Sonar {
      * @param e Error thrown while starting up.
      */
     private static void startupCrashDialog(Throwable e) {
-        if (AppWindow.getFrame() != null) return;
-        JOptionPane.showMessageDialog(
-            null,
-            "<html>Sonar failed to start:<br/>" +
-                e +
-                "<br/><br/>Run Diagnose.bat in the install folder to find the cause.</html>",
-            "Sonar",
-            JOptionPane.ERROR_MESSAGE
-        );
+        JFrame existing = AppWindow.getFrame();
+        // A JFrame object can exist even when construction failed before it was shown.
+        // Do not suppress the only useful error report merely because makeFrame assigned it.
+        if (existing != null && existing.isShowing()) {
+            System.err.println("[startup] Startup failed after the Sonar window became visible: " + e);
+            return;
+        }
+        System.err.println("[startup] Sonar did not reach a visible main window.");
+        e.printStackTrace(System.err);
+        try {
+            JOptionPane.showMessageDialog(
+                existing,
+                "<html>Sonar failed to start:<br/>" +
+                    e +
+                    "<br/><br/>See sonar.log for the startup trace.</html>",
+                "Sonar",
+                JOptionPane.ERROR_MESSAGE
+            );
+        } catch (Throwable dialogFailure) {
+            System.err.println("[startup] Could not display the startup error dialog: " + dialogFailure);
+        }
         System.exit(1);
     }
 

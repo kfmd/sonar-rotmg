@@ -25,6 +25,7 @@ public final class WindowsShell {
      * step hidden in the background; copies built from source are left alone.
      */
     public static void refreshLauncherIfStale(String version) {
+        if (!System.getProperty("os.name", "").toLowerCase().contains("win")) return;
         try {
             java.io.File run = new java.io.File("").getAbsoluteFile(), root = run.getParentFile();
             if (root == null || new java.io.File(root, "build.gradle").exists()) return;

@@ -150,9 +150,13 @@ public class NativeMappings {
     static String libName(boolean isWindows) {
         if (isWindows) {
             return "wpcap";
-        } else {
-            return "pcap";
         }
+        // Apple's system libpcap uses the versioned A dylib name rather than the
+        // generic libpcap.dylib name JNA would derive from "pcap".
+        if (Platform.getOSType() == Platform.MAC) {
+            return "/usr/lib/libpcap.A.dylib";
+        }
+        return "pcap";
     }
 
     static short defaultAfInet6() {

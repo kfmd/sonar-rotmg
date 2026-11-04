@@ -159,6 +159,18 @@ final class Updater {
             if (!quiet) status.accept("Up to date");
             return;
         }
+        if (System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("mac")) {
+            status.accept("Update available");
+            if (!quiet) {
+                Object[] options = {"Open release page", "Later"};
+                int choice = JOptionPane.showOptionDialog(parent,
+                        "A newer Sonar release is available, but this macOS source port does not yet have a signed macOS updater package.\n\n"
+                                + "Review the release notes and macOS assets before installing an update.",
+                        "Sonar update", JOptionPane.DEFAULT_OPTION, JOptionPane.INFORMATION_MESSAGE, null, options, options[0]);
+                if (choice == 0) browse(parent, REPOSITORY + "/releases/tag/" + tag);
+            }
+            return;
+        }
         status.accept("Update available");
         String version = clean(tag);
         File root = installRoot();

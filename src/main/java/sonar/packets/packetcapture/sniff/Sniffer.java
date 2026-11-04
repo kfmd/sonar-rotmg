@@ -69,6 +69,8 @@ public class Sniffer {
         realmPcap = null;
         stop = false;
 
+        int startedSniffers = 0;
+        Exception lastCaptureError = null;
         for (int i = 0; i < interfaceList.length; i++) {
             DefaultLiveOptions defaultLiveOptions = new DefaultLiveOptions();
             defaultLiveOptions.timeout(60000);
@@ -107,11 +109,22 @@ public class Sniffer {
                 pcaps[i] = pcap;
 
             } catch (Exception e) {
+                lastCaptureError = e;
                 e.printStackTrace();
                 continue;
             }
 
             startPacketSniffer(pcap);
+            startedSniffers++;
+        }
+
+        // Do not wait forever for the first game packet when macOS denied every BPF open,
+        // or when this machine exposes no usable IPv4 capture interface.
+        if (startedSniffers == 0) {
+            throw new IllegalStateException(lastCaptureError == null
+                    ? "No usable network interface was found for packet capture."
+                    : "Could not open any network interface for packet capture: " + lastCaptureError,
+                    lastCaptureError);
         }
 
         closeUnusedSniffers();

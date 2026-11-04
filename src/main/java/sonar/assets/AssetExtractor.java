@@ -53,9 +53,7 @@ public class AssetExtractor {
     static {
         String os = System.getProperty("os.name").toLowerCase();
         if (os.contains("mac")) {
-            REALM_RES_PATH =
-                System.getProperty("user.home") +
-                    "/.local/share/RealmOfTheMadGod/Production/RotMGExalt.app/Contents/Resources/Data/resources.assets";
+            REALM_RES_PATH = macAssetsPath();
         } else if (os.contains("win")) {
             String localAppData = System.getenv("LOCALAPPDATA");
             if (localAppData != null) {
@@ -81,6 +79,55 @@ public class AssetExtractor {
         if (savedPath != null && new File(savedPath).isFile()) {
             REALM_RES_PATH = savedPath;
         }
+    }
+
+
+    /** Common Steam and standalone Unity app-bundle locations on macOS. */
+    private static String macAssetsPath() {
+        String home = System.getProperty("user.home", "");
+        String[] candidates = {
+                // Exalt Client Mac Production client used by the current macOS installation.
+                home + "/.local/share/RealmOfTheMadGod/Production/RotMGExalt.app/Contents/Resources/Data/resources.assets",
+                // Steam macOS installation using the launcher bundle name.
+                home + "/Library/Application Support/Steam/steamapps/common/Realm of the Mad God/RotMG Exalt Launcher.app/Contents/Resources/Data/resources.assets",
+                // Older/alternate Steam and standalone bundle layouts.
+                home + "/Library/Application Support/Steam/steamapps/common/Realm of the Mad God Exalt/RotMG Exalt.app/Contents/Resources/Data/resources.assets",
+                home + "/Library/Application Support/Steam/steamapps/common/Realm of the Mad God Exalt/RotMGExalt.app/Contents/Resources/Data/resources.assets",
+                "/Applications/RotMG Exalt.app/Contents/Resources/Data/resources.assets",
+                "/Applications/RotMGExalt.app/Contents/Resources/Data/resources.assets",
+                "/Applications/Realm of the Mad God Exalt.app/Contents/Resources/Data/resources.assets",
+                home + "/Library/Application Support/RealmOfTheMadGod/Production/RotMG Exalt.app/Contents/Resources/Data/resources.assets",
+                home + "/Library/Application Support/RealmOfTheMadGod/Production/RotMGExalt.app/Contents/Resources/Data/resources.assets"
+        };
+        for (String path : candidates) if (new File(path).isFile()) return path;
+
+        // Spotlight can find app bundles in custom Steam libraries and non-standard locations.
+        // This is only a convenience lookup; the existing file picker remains the final fallback.
+        Process search = null;
+        try {
+            String query = "kMDItemFSName == 'RotMG Exalt Launcher.app' || "
+                    + "kMDItemFSName == 'RotMG Exalt.app' || "
+                    + "kMDItemFSName == 'RotMGExalt.app' || "
+                    + "kMDItemFSName == 'Realm of the Mad God Exalt.app'";
+            search = new ProcessBuilder("/usr/bin/mdfind", query).redirectErrorStream(true).start();
+            if (!search.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
+                search.destroyForcibly();
+            } else {
+                java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.InputStreamReader(
+                        search.getInputStream(), java.nio.charset.StandardCharsets.UTF_8));
+                String bundle;
+                while ((bundle = reader.readLine()) != null) {
+                    File assets = new File(bundle.trim(), "Contents/Resources/Data/resources.assets");
+                    if (assets.isFile()) return assets.getAbsolutePath();
+                }
+            }
+        } catch (Exception ignored) {
+            if (search != null) search.destroyForcibly();
+        }
+
+        // Keep the most likely path so the existing asset picker can be used if Spotlight is
+        // disabled or the launcher installed the game in an unindexed location.
+        return candidates[0];
     }
 
     public static void main(String[] args) throws Throwable {
@@ -116,22 +163,62 @@ public class AssetExtractor {
     public static boolean extractHeadless(String version) throws Throwable {
         File assetsFile = assetFile();
         if (assetsFile == null) return false;
+        File externalOutput = externalExaltOutput();
+        boolean isMacOS = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("mac");
+        if (isMacOS && externalOutput == null) {
+            throw new IOException(
+                    "The current macOS Exalt build needs the external Unity extraction output. "
+                            + "Run rotmg-network/exalt-extractor against "
+                            + "~/.local/share/RealmOfTheMadGod/Production/RotMGExalt.app/Contents/Resources/Data "
+                            + "and set SONAR_EXALT_OUTPUT_DIR or -Dsonar.exalt.output to its output folder. "
+                            + "A persistent default is ~/Library/Application Support/Sonar/exalt-extractor-output.");
+        }
+
         String lastModifiedTime = lastEdited(version);
         if (checkUpdateAssets(lastModifiedTime) == 0) {
             System.out.println("Assets already up to date.");
             return true;
         }
-        extractAssets(assetsFile, lastModifiedTime);
-        extractAssetsFromXML();
+
+        if (externalOutput != null) {
+            System.out.println("[assets] Importing Exalt Extractor output from " + externalOutput.getAbsolutePath());
+            importExternalExtraction(externalOutput);
+            // UnityPy resolves this build's streamed Unity resources. Sonar then builds
+            // its own compact object/tile indexes from the manifest-listed XML files.
+            extractAssetsFromXML();
+            extractArcaneArt(assetsFile);
+        } else {
+            extractAssets(assetsFile, lastModifiedTime);
+            extractAssetsFromXML();
+        }
+
+        // Only mark the cache current after import and object/tile indexing succeed.
+        PropertiesManager.setProperties("lastModifiedTime", lastModifiedTime);
         return checkUpdateAssets(lastModifiedTime) == 0;
     }
 
     public static String lastEdited(String version) throws IOException {
         File file = assetFile();
         if (file == null) return "missing-" + version;
-        BasicFileAttributes attr;
-        attr = Files.readAttributes(file.toPath(), BasicFileAttributes.class);
-        return attr.lastModifiedTime().toString() + "-" + version;
+        BasicFileAttributes attr = Files.readAttributes(file.toPath(), BasicFileAttributes.class);
+        String signature = attr.lastModifiedTime().toString() + "-" + version;
+        File externalOutput = externalExaltOutput();
+        if (externalOutput != null) {
+            long latest = 0L;
+            long totalBytes = 0L;
+            long fileCount = 0L;
+            Path root = externalOutput.toPath();
+            try (Stream<Path> paths = Files.walk(root)) {
+                for (Path path : (Iterable<Path>) paths.filter(Files::isRegularFile)::iterator) {
+                    BasicFileAttributes externalAttr = Files.readAttributes(path, BasicFileAttributes.class);
+                    latest = Math.max(latest, externalAttr.lastModifiedTime().toMillis());
+                    totalBytes += externalAttr.size();
+                    fileCount++;
+                }
+            }
+            signature += "-external-" + root.toAbsolutePath().normalize() + "-" + latest + "-" + totalBytes + "-" + fileCount;
+        }
+        return signature;
     }
 
     /**
@@ -319,7 +406,7 @@ public class AssetExtractor {
 
     /**
      * Uses custom path to resources.assets file. If no custom path is found
-     * finds Windows path to realm resources.assets file.
+     * finds the platform-specific Realm resources.assets file.
      *
      * @return Absolute path to resources.assets file.
      */
@@ -348,6 +435,104 @@ public class AssetExtractor {
             "ERROR: Default path not found: " + defaultFile.getAbsolutePath()
         );
         return null;
+    }
+
+    /**
+     * Resolve the Exalt Extractor output from a JVM property, environment variable,
+     * or the stable per-user location used by the macOS app bundle.
+     */
+    private static File externalExaltOutput() {
+        String configured = System.getProperty("sonar.exalt.output");
+        if (configured == null || configured.trim().isEmpty()) {
+            configured = System.getenv("SONAR_EXALT_OUTPUT_DIR");
+        }
+        if (configured == null || configured.trim().isEmpty()) {
+            File defaultOutput = sonar.DataDir.file("exalt-extractor-output");
+            return isExternalExaltOutput(defaultOutput) ? defaultOutput : null;
+        }
+
+        File root = new File(configured.trim()).getAbsoluteFile();
+        if (!isExternalExaltOutput(root)) {
+            throw new IllegalArgumentException(
+                    "Invalid Exalt Extractor output directory: " + root.getAbsolutePath()
+                            + ". Expected xml/, spritesheets/spritesheet.json, and assets_manifest.json.");
+        }
+        return root;
+    }
+
+    private static boolean isExternalExaltOutput(File root) {
+        return root != null
+                && root.isDirectory()
+                && new File(root, "xml").isDirectory()
+                && new File(root, "spritesheets/spritesheet.json").isFile()
+                && new File(root, "assets_manifest.json").isFile();
+    }
+
+    /**
+     * Import XML definitions and sprite assets exported by rotmg-network/exalt-extractor.
+     * The original game installation and extractor output are only read, never modified.
+     */
+    private static void importExternalExtraction(File sourceRoot) throws IOException {
+        Path sourceXml = new File(sourceRoot, "xml").toPath();
+        Path targetXml = sonar.DataDir.file(XML_DIR_PATH).toPath();
+        Path sourceSprites = new File(sourceRoot, "spritesheets").toPath();
+        Path targetSprites = sonar.DataDir.file("assets/sprites").toPath();
+        Path targetJson = sonar.DataDir.file("assets/json").toPath();
+
+        Files.createDirectories(targetXml);
+        Files.createDirectories(targetSprites);
+        Files.createDirectories(targetJson);
+
+        try (Stream<Path> paths = Files.list(targetXml)) {
+            for (Path path : (Iterable<Path>) paths::iterator) {
+                if (Files.isRegularFile(path)) Files.deleteIfExists(path);
+            }
+        }
+        try (Stream<Path> paths = Files.list(targetSprites)) {
+            for (Path path : (Iterable<Path>) paths::iterator) {
+                if (Files.isRegularFile(path)
+                        && path.getFileName().toString().toLowerCase(java.util.Locale.ROOT).endsWith(".png")) {
+                    Files.deleteIfExists(path);
+                }
+            }
+        }
+
+        int xmlCount = 0;
+        try (Stream<Path> paths = Files.walk(sourceXml)) {
+            for (Path path : (Iterable<Path>) paths.filter(Files::isRegularFile)::iterator) {
+                if (!path.getFileName().toString().toLowerCase(java.util.Locale.ROOT).endsWith(".xml")) continue;
+                Files.copy(path, targetXml.resolve(path.getFileName().toString()),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                xmlCount++;
+            }
+        }
+        if (xmlCount == 0) throw new IOException("No XML files found in external Exalt extraction: " + sourceXml);
+
+        for (String name : new String[]{"groundTiles.png", "characters.png", "characters_masks.png", "mapObjects.png"}) {
+            Path from = sourceSprites.resolve(name);
+            if (!Files.isRegularFile(from)) throw new IOException("Missing extracted sprite sheet: " + from);
+            Files.copy(from, targetSprites.resolve(name), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
+        Files.copy(sourceSprites.resolve("spritesheet.json"), targetJson.resolve("spritesheet.json"),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        Files.copy(new File(sourceRoot, "assets_manifest.json").toPath(), targetXml.resolve("manifest.json"),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+
+        // Keep packet-name lists as reference material. Sonar's own Java packet decoders
+        // remain authoritative; names alone do not define packet serialization.
+        File sourcePackets = new File(sourceRoot, "packets");
+        if (sourcePackets.isDirectory()) {
+            Path targetPackets = sonar.DataDir.dir("assets/packets").toPath();
+            try (Stream<Path> paths = Files.list(sourcePackets.toPath())) {
+                for (Path path : (Iterable<Path>) paths::iterator) {
+                    if (Files.isRegularFile(path)) {
+                        Files.copy(path, targetPackets.resolve(path.getFileName().toString()),
+                                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    }
+                }
+            }
+        }
+        System.out.printf("[assets] Imported %d XML files and 4 sprite sheets from Exalt Extractor output.%n", xmlCount);
     }
 
     /**
@@ -413,19 +598,55 @@ public class AssetExtractor {
         ArrayList<AssetObject> objectAssets = new ArrayList<>();
         ArrayList<AssetTile> tileAssets = new ArrayList<>();
         ArrayList<Path> files = new ArrayList<>();
+        Path xmlRoot = sonar.DataDir.file(XML_DIR_PATH).toPath();
 
-        Files.walk(sonar.DataDir.file(XML_DIR_PATH).toPath())
-            .filter(Files::isRegularFile)
-            .filter(p -> p.toString().endsWith("xml"))
-            .forEach(files::add);
+        if (!Files.isDirectory(xmlRoot)) {
+            throw new IOException("XML asset directory does not exist: " + xmlRoot);
+        }
 
+        // Close the walk stream deterministically. The Exalt manifest's object/tile
+        // order is authoritative because legacy and current XML files can reuse IDs.
+        try (Stream<Path> paths = Files.walk(xmlRoot)) {
+            paths
+                .filter(Files::isRegularFile)
+                .filter(p -> p.getFileName().toString().toLowerCase(java.util.Locale.ROOT).endsWith(".xml"))
+                .sorted()
+                .forEach(files::add);
+        }
+        files = orderXmlFilesByManifest(xmlRoot, files);
+
+        System.out.println("Found " + files.size() + " definition XML files in " + xmlRoot.toAbsolutePath());
         int counter = 0;
         for (Path p : files) {
             counter++;
-            AssetExtractor.setDisplay("Parsing XML Files " + counter);
+            long started = System.nanoTime();
+            long size = Files.size(p);
+            String fileLabel = xmlRoot.relativize(p).toString();
+            AssetExtractor.setDisplay("Parsing XML Files " + counter + "/" + files.size());
+            System.out.printf(
+                "[assets] Parsing XML %d/%d: %s (%.1f KB)%n",
+                counter, files.size(), fileLabel, size / 1024.0
+            );
             try {
                 parseXML(p, objectAssets, tileAssets);
-            } catch (SAXException e) {}
+                long elapsedMs = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                    System.nanoTime() - started
+                );
+                System.out.printf(
+                    "[assets] Parsed %s in %d ms; objects=%d, tiles=%d%n",
+                    fileLabel, elapsedMs, objectAssets.size(), tileAssets.size()
+                );
+            } catch (SAXException e) {
+                System.err.printf("[assets] Skipping malformed XML %s: %s%n", fileLabel, e.getMessage());
+            }
+        }
+
+        if (objectAssets.isEmpty() || tileAssets.isEmpty()) {
+            throw new IOException(
+                "Incomplete ROTMG XML asset extraction: found " + objectAssets.size()
+                    + " objects and " + tileAssets.size() + " tiles. "
+                    + "The asset cache was not marked current; inspect the extracted XML manifest and files."
+            );
         }
 
         objectAssets.sort(Comparator.comparing(a -> a.id));
@@ -437,6 +658,72 @@ public class AssetExtractor {
         tileAssets.forEach(e ->
             Util.print(ASSETS_TILE_FILE_DIR_PATH + "-", e.toString())
         );
+        System.out.println(
+            "[assets] XML parsing complete: " + objectAssets.size()
+                + " objects, " + tileAssets.size() + " tiles."
+        );
+    }
+
+    /**
+     * Use only XML documents listed in the manifest's objects/tiles arrays, in that order.
+     * Other TextAssets (for example pet behaviour metadata) can contain IDs that collide
+     * with actual game objects and must not be added to ObjectID.list or TileID.list.
+     * Extractor output is flattened, so nested manifest paths are matched by basename.
+     */
+    private static ArrayList<Path> orderXmlFilesByManifest(Path xmlRoot, ArrayList<Path> sortedFiles)
+            throws IOException {
+        Path manifestPath = xmlRoot.resolve("manifest.json");
+        if (!Files.isRegularFile(manifestPath)) {
+            System.out.println("[assets] No XML ordering manifest found; using filename order.");
+            return sortedFiles;
+        }
+
+        java.util.LinkedHashSet<Path> ordered = new java.util.LinkedHashSet<>();
+        ArrayList<String> missing = new ArrayList<>();
+        try (java.io.Reader reader = Files.newBufferedReader(manifestPath, java.nio.charset.StandardCharsets.UTF_8)) {
+            com.google.gson.JsonObject manifest = new com.google.gson.JsonParser().parse(reader).getAsJsonObject();
+            for (String section : new String[]{"objects", "tiles"}) {
+                com.google.gson.JsonArray entries = manifest.getAsJsonArray(section);
+                if (entries == null) {
+                    throw new IOException("XML manifest is missing the '" + section + "' list: " + manifestPath);
+                }
+                for (com.google.gson.JsonElement entry : entries) {
+                    if (!entry.isJsonObject() || !entry.getAsJsonObject().has("path")) continue;
+                    String relative = entry.getAsJsonObject().get("path").getAsString();
+                    Path exact = xmlRoot.resolve(relative).normalize();
+                    if (Files.isRegularFile(exact) && exact.startsWith(xmlRoot)) {
+                        ordered.add(exact);
+                        continue;
+                    }
+                    String basename = new File(relative).getName();
+                    Path match = null;
+                    for (Path candidate : sortedFiles) {
+                        if (candidate.getFileName().toString().equalsIgnoreCase(basename)) {
+                            match = candidate;
+                            break;
+                        }
+                    }
+                    if (match == null) missing.add(relative);
+                    else ordered.add(match);
+                }
+            }
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("Could not read XML ordering manifest " + manifestPath + ": " + e.getMessage(), e);
+        }
+
+        if (!missing.isEmpty()) {
+            throw new IOException("The Exalt XML manifest references " + missing.size()
+                    + " XML files that were not extracted. First missing entries: "
+                    + missing.subList(0, Math.min(10, missing.size())));
+        }
+        if (ordered.isEmpty()) {
+            throw new IOException("The Exalt XML manifest did not identify any Object/Ground XML files: " + manifestPath);
+        }
+        System.out.printf("[assets] Applied Exalt manifest precedence: %d definition XML files (objects then tiles).%n",
+                ordered.size());
+        return new ArrayList<>(ordered);
     }
 
     /**
@@ -458,8 +745,19 @@ public class AssetExtractor {
         throws ParserConfigurationException, SAXException, IOException {
         DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
         dbf.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+        // Unity's game XML does not need network DTDs or external entities. Besides
+        // being safer, disabling them prevents a parser from stalling on an external
+        // resource while the asset extraction progress appears frozen.
+        dbf.setFeature("http://xml.org/sax/features/external-general-entities", false);
+        dbf.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+        dbf.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+        dbf.setXIncludeAware(false);
+        dbf.setExpandEntityReferences(false);
+        dbf.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+        dbf.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
         DocumentBuilder db = dbf.newDocumentBuilder();
         db.setErrorHandler(new IgnoreErrorHandler());
+        db.setEntityResolver((publicId, systemId) -> new org.xml.sax.InputSource(new java.io.StringReader("")));
         Document doc = db.parse(new File(path.toAbsolutePath().toString()));
         doc.getDocumentElement().normalize();
         return doc;
@@ -875,13 +1173,19 @@ public class AssetExtractor {
     private static class IgnoreErrorHandler implements ErrorHandler {
 
         @Override
-        public void warning(SAXParseException exception) throws SAXException {}
+        public void warning(SAXParseException exception) throws SAXException {
+            System.err.println("[assets] XML warning: " + exception.getMessage());
+        }
 
         @Override
-        public void error(SAXParseException exception) throws SAXException {}
+        public void error(SAXParseException exception) throws SAXException {
+            throw exception;
+        }
 
         @Override
         public void fatalError(SAXParseException exception)
-            throws SAXException {}
+            throws SAXException {
+            throw exception;
+        }
     }
 }

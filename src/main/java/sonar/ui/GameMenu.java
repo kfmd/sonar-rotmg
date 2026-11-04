@@ -75,6 +75,10 @@ final class GameMenu {
     }
 
     private static boolean escapeDown() {
+        if (MacOSNative.isMac()) {
+            MacInputMonitor.start();
+            return MacInputMonitor.keyDown(53) || MacInputMonitor.wasPressed(53);
+        }
         try {
             // the top bit says it is down now, the low bit that it went down since the last look
             return (Keys.INSTANCE.GetAsyncKeyState(0x1B) & 0x8001) != 0;

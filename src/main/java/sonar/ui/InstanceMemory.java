@@ -76,6 +76,9 @@ final class InstanceMemory {
     static String wipe() {
         List<File> targets = present();
         if (targets.isEmpty()) return "Nothing to clear";
+        if (System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("mac")) {
+            return moveToMacTrash(targets);
+        }
         StringBuilder paths = new StringBuilder();
         for (File f : targets) {
             if (paths.length() > 0) paths.append(',');
@@ -107,5 +110,26 @@ final class InstanceMemory {
             return "Couldn't clear";
         }
         return "Sent to Recycle Bin";
+    }
+
+    /** Uses Finder's Trash so this destructive action remains recoverable on macOS. */
+    private static String moveToMacTrash(List<File> targets) {
+        StringBuilder script = new StringBuilder();
+        for (File file : targets) {
+            String path = file.getAbsolutePath().replace("\\", "\\\\").replace("\"", "\\\"");
+            script.append("tell application \"Finder\" to delete POSIX file \"")
+                    .append(path).append("\"\n");
+        }
+        try {
+            Process p = new ProcessBuilder("/usr/bin/osascript", "-e", script.toString())
+                    .redirectErrorStream(true).start();
+            if (!p.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                return "Took too long";
+            }
+            return p.exitValue() == 0 ? "Sent to Trash" : "Couldn't move to Trash";
+        } catch (Exception e) {
+            return "Couldn't move to Trash";
+        }
     }
 }

@@ -1,0 +1,128 @@
+diff -ruN sonar-patch-a/MACOS_PORT.md sonar-patch-b/MACOS_PORT.md
+--- sonar-patch-a/MACOS_PORT.md	2026-11-04 02:19:47.000000000 +0000
++++ sonar-patch-b/MACOS_PORT.md	2026-11-04 02:59:04.119010978 +0000
+@@ -45,6 +45,10 @@
+ ./tools/macos/diagnose-macos.sh
+ ```
+ 
++Homebrew installs `openjdk@17` as a keg-only JDK, so `/usr/libexec/java_home` may not list it until you create Homebrew's recommended JavaVirtualMachines symlink. The Sonar run, build, and diagnostic scripts now resolve the Homebrew JDK directly; a global symlink is not required.
++
++The system libpcap can be loaded from Apple's dyld shared cache, so a plain filesystem existence check for `/usr/lib/libpcap.A.dylib` is not conclusive. The diagnostic script also checks the system `tcpdump` binary's linked libraries.
++
+ ## ROTMG Exalt asset path
+ 
+ The port tries the common Steam and standalone `.app` locations for `Contents/Resources/Data/resources.assets`. If Exalt lives in a custom Steam library or another directory, use Sonar's existing asset-path picker and select `resources.assets` from inside the Exalt app bundle. The path is stored in Sonar's preferences.
+@@ -61,4 +65,4 @@
+ 
+ ## Known verification limits
+ 
+-The source archive was patched in a Linux build environment. The Gradle wrapper requires downloading Gradle/dependencies, and network access to the Gradle distribution host was unavailable during this session. Therefore the macOS build, native CoreGraphics/AppKit calls, privacy prompts, packet capture, and overlay click-through have **not** been executed on an Apple Silicon Mac. Treat this as a first implementation / developer port, not a verified ready-to-play binary. Build and validate it on the target Mac, then collect `update/run.log` and terminal output for any remaining native API differences.
++The source archive is patched in a Linux build environment. The Gradle wrapper requires downloading Gradle/dependencies, and network access to the Gradle distribution host was unavailable in the patching environment. The two Java compilation errors reported during the first Apple Silicon build have been corrected; shell scripts pass `bash -n`. The full Gradle build, native CoreGraphics/AppKit calls, privacy prompts, packet capture, and overlay click-through still need execution on the target Mac. Treat this as a developer port, not a verified ready-to-play binary. Build and validate it on the target Mac, then share terminal output and `update/run.log` for any remaining native API differences.
+diff -ruN sonar-patch-a/src/main/java/sonar/ui/DamageMeterWindow.java sonar-patch-b/src/main/java/sonar/ui/DamageMeterWindow.java
+--- sonar-patch-a/src/main/java/sonar/ui/DamageMeterWindow.java	2026-11-04 02:04:06.000000000 +0000
++++ sonar-patch-b/src/main/java/sonar/ui/DamageMeterWindow.java	2026-11-04 02:58:14.972119130 +0000
+@@ -1253,7 +1253,7 @@
+     private void applyClickThrough() {
+         if (MacOSNative.isMac()) {
+             boolean through = !adjusting;
+-            clickThroughOn = MacOSNative.setClickThrough(this, through);
++            MacOSNative.setClickThrough(this, through);
+             return;
+         }
+         try {
+diff -ruN sonar-patch-a/src/main/java/sonar/ui/MacOSNative.java sonar-patch-b/src/main/java/sonar/ui/MacOSNative.java
+--- sonar-patch-a/src/main/java/sonar/ui/MacOSNative.java	2026-11-04 02:18:45.000000000 +0000
++++ sonar-patch-b/src/main/java/sonar/ui/MacOSNative.java	2026-11-04 02:58:14.972275406 +0000
+@@ -320,7 +320,8 @@
+             Pointer sel = selector.invokePointer(new Object[]{"setIgnoresMouseEvents:"});
+             msg.invokeVoid(new Object[]{nativeWindow, sel, (byte) (through ? 1 : 0)});
+             Pointer getter = selector.invokePointer(new Object[]{"ignoresMouseEvents"});
+-            byte actual = msg.invokeByte(new Object[]{new Pointer(handle), getter});
++            Object result = msg.invoke(Byte.class, new Object[]{nativeWindow, getter});
++            byte actual = result instanceof Number ? ((Number) result).byteValue() : 0;
+             return (actual != 0) == through;
+         } catch (Throwable t) {
+             System.err.println("[mac] could not change overlay mouse transparency: " + t);
+diff -ruN sonar-patch-a/tools/macos/build-macos.sh sonar-patch-b/tools/macos/build-macos.sh
+--- sonar-patch-a/tools/macos/build-macos.sh	2026-11-04 02:11:05.000000000 +0000
++++ sonar-patch-b/tools/macos/build-macos.sh	2026-11-04 02:59:04.118637625 +0000
+@@ -10,7 +10,11 @@
+ JAVA_HOME="$(/usr/libexec/java_home -v 17 2>/dev/null || true)"
+ if [[ -z "$JAVA_HOME" ]] && command -v brew >/dev/null 2>&1; then
+   BREW_JDK="$(brew --prefix openjdk@17 2>/dev/null || true)"
+-  [[ -x "$BREW_JDK/bin/java" ]] && JAVA_HOME="$BREW_JDK"
++  if [[ -n "$BREW_JDK" && -x "$BREW_JDK/libexec/openjdk.jdk/Contents/Home/bin/java" ]]; then
++    JAVA_HOME="$BREW_JDK/libexec/openjdk.jdk/Contents/Home"
++  elif [[ -n "$BREW_JDK" && -x "$BREW_JDK/bin/java" ]]; then
++    JAVA_HOME="$BREW_JDK"
++  fi
+ fi
+ if [[ -z "$JAVA_HOME" || ! -x "$JAVA_HOME/bin/java" ]]; then
+   echo "JDK 17 is required. Install it with: brew install openjdk@17" >&2
+@@ -37,7 +41,7 @@
+   --java-options=--add-opens=java.desktop/sun.awt=ALL-UNNAMED
+   --java-options=--add-opens=java.desktop/sun.lwawt=ALL-UNNAMED
+   --java-options=--add-opens=java.desktop/sun.lwawt.macosx=ALL-UNNAMED
+-  '--java-options=-Dsonar.data=~/Library/Application Support/Sonar'
++  "--java-options=-Dsonar.data=$HOME/Library/Application Support/Sonar"
+ )
+ 
+ "$JAVA_HOME/bin/jpackage" --type app-image --dest build/macos "${COMMON[@]}"
+diff -ruN sonar-patch-a/tools/macos/diagnose-macos.sh sonar-patch-b/tools/macos/diagnose-macos.sh
+--- sonar-patch-a/tools/macos/diagnose-macos.sh	2026-11-04 02:15:29.000000000 +0000
++++ sonar-patch-b/tools/macos/diagnose-macos.sh	2026-11-04 02:59:04.118801082 +0000
+@@ -6,10 +6,35 @@
+ printf 'macOS: '; sw_vers -productVersion 2>/dev/null || true
+ printf 'Build: '; sw_vers -buildVersion 2>/dev/null || true
+ printf 'Architecture: '; uname -m
+-printf 'Java: '; java -version 2>&1 | head -n 1 || true
+-printf 'Java home: '; /usr/libexec/java_home -v 17 2>/dev/null || echo 'JDK 17 not found'
++JAVA_HOME="$(/usr/libexec/java_home -v 17 2>/dev/null || true)"
++if [[ -z "$JAVA_HOME" ]] && command -v brew >/dev/null 2>&1; then
++  BREW_JDK="$(brew --prefix openjdk@17 2>/dev/null || true)"
++  if [[ -n "$BREW_JDK" && -x "$BREW_JDK/libexec/openjdk.jdk/Contents/Home/bin/java" ]]; then
++    JAVA_HOME="$BREW_JDK/libexec/openjdk.jdk/Contents/Home"
++  elif [[ -n "$BREW_JDK" && -x "$BREW_JDK/bin/java" ]]; then
++    JAVA_HOME="$BREW_JDK"
++  fi
++fi
++if [[ -n "$JAVA_HOME" && -x "$JAVA_HOME/bin/java" ]]; then
++  printf 'Java: '
++  "$JAVA_HOME/bin/java" -version 2>&1 | head -n 1
++  printf 'Java home: %s\n' "$JAVA_HOME"
++elif command -v java >/dev/null 2>&1; then
++  printf 'Java: '
++  java -version 2>&1 | head -n 1
++  printf 'Java home: %s\n' "$(/usr/libexec/java_home 2>/dev/null || echo 'not registered with java_home')"
++else
++  echo 'Java: not found'
++  echo 'Java home: JDK 17 not found'
++fi
+ printf '\nPacket capture:\n'
+-if [[ -e /usr/lib/libpcap.A.dylib ]]; then echo '  System libpcap: present (/usr/lib/libpcap.A.dylib)'; else echo '  System libpcap: not found'; fi
++if [[ -e /usr/lib/libpcap.A.dylib ]]; then
++  echo '  System libpcap: present (/usr/lib/libpcap.A.dylib)'
++elif [[ -x /usr/sbin/tcpdump ]] && command -v otool >/dev/null 2>&1 && otool -L /usr/sbin/tcpdump 2>/dev/null | grep -q 'libpcap'; then
++  echo '  System libpcap: linked through the macOS dyld shared cache'
++else
++  echo '  System libpcap: unable to confirm (check with: otool -L /usr/sbin/tcpdump)'
++fi
+ if compgen -G '/dev/bpf*' >/dev/null; then
+   echo '  BPF devices: present'
+   if [[ -r /dev/bpf0 ]]; then echo '  /dev/bpf0 readable: yes'; else echo '  /dev/bpf0 readable: no'; fi
+diff -ruN sonar-patch-a/tools/macos/run-macos.sh sonar-patch-b/tools/macos/run-macos.sh
+--- sonar-patch-a/tools/macos/run-macos.sh	2026-11-04 02:10:32.000000000 +0000
++++ sonar-patch-b/tools/macos/run-macos.sh	2026-11-04 02:59:04.118152814 +0000
+@@ -10,7 +10,11 @@
+ JAVA_HOME="$(/usr/libexec/java_home -v 17 2>/dev/null || true)"
+ if [[ -z "$JAVA_HOME" ]] && command -v brew >/dev/null 2>&1; then
+   BREW_JDK="$(brew --prefix openjdk@17 2>/dev/null || true)"
+-  [[ -x "$BREW_JDK/bin/java" ]] && JAVA_HOME="$BREW_JDK"
++  if [[ -n "$BREW_JDK" && -x "$BREW_JDK/libexec/openjdk.jdk/Contents/Home/bin/java" ]]; then
++    JAVA_HOME="$BREW_JDK/libexec/openjdk.jdk/Contents/Home"
++  elif [[ -n "$BREW_JDK" && -x "$BREW_JDK/bin/java" ]]; then
++    JAVA_HOME="$BREW_JDK"
++  fi
+ fi
+ if [[ -z "$JAVA_HOME" || ! -x "$JAVA_HOME/bin/java" ]]; then
+   echo "JDK 17 is required. Install it with: brew install openjdk@17" >&2

@@ -31,8 +31,8 @@ public class PacketProcessor extends Thread implements PProcessor {
     private final byte[] srcAddr;
 
     /**
-     * Basic constructor of packetProcessor
-     * TODO: Add linux and mac support later
+     * Basic constructor of packetProcessor. Packet decoding is platform-independent;
+     * the native capture service selects the operating-system packet backend.
      */
     public PacketProcessor() {
         sniffer = new Sniffer(this);
@@ -66,10 +66,27 @@ public class PacketProcessor extends Thread implements PProcessor {
         try {
             sniffer.startSniffer();
         } catch (UnsatisfiedLinkError e) {
-            new MissingNpcapGUI();
+            if (System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("mac")) {
+                showMacCaptureHelp(e);
+            } else {
+                new MissingNpcapGUI();
+            }
         } catch (Exception e) {
             e.printStackTrace();
+            if (System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("mac")) {
+                showMacCaptureHelp(e);
+            }
         }
+    }
+
+    private static void showMacCaptureHelp(Throwable cause) {
+        final String message = "Sonar could not start macOS packet capture.\n\n"
+                + "1. Install the ChmodBPF package included in the official Wireshark macOS installer.\n"
+                + "2. Log out and back in (or restart) after installing it.\n"
+                + "3. Run tools/macos/diagnose-macos.sh and check /dev/bpf permissions.\n\n"
+                + "Details: " + cause;
+        javax.swing.SwingUtilities.invokeLater(() -> javax.swing.JOptionPane.showMessageDialog(
+                null, message, "Sonar — macOS packet capture", javax.swing.JOptionPane.WARNING_MESSAGE));
     }
 
     /**

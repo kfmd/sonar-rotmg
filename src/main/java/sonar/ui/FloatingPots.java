@@ -211,7 +211,8 @@ final class FloatingPots {
         }
 
         int[] keys() {
-            return new int[]{0x0D, 0x1B, 0xBF, zoomIn, zoomOut, rotateLeft, rotateRight, reset, center};
+            return new int[]{GameKeys.fromVirtualKey(0x0D), GameKeys.fromVirtualKey(0x1B),
+                    GameKeys.fromVirtualKey(0xBF), zoomIn, zoomOut, rotateLeft, rotateRight, reset, center};
         }
     }
 
@@ -258,12 +259,13 @@ final class FloatingPots {
 
     private static int key(Map<String, Integer> reg, String name, int fallback) {
         Integer unity = reg.get(name);
-        int vk = unity == null ? 0 : GameKeys.vkOf(unity);
-        return vk == 0 ? fallback : vk;
+        int vk = unity == null ? 0 : GameKeys.keyCodeOf(unity);
+        return vk == 0 ? GameKeys.fromVirtualKey(fallback) : vk;
     }
 
     /** Every number the game keeps in the registry, by name without Unity's hash suffix. */
     static Map<String, Integer> registry() {
+        if (MacOSNative.isMac()) return MacGameSettings.readAll();
         Map<String, Integer> out = new HashMap<>();
         try {
             Process p = new ProcessBuilder("reg", "query", "HKCU\\Software\\DECA Live Operations GmbH\\RotMGExalt").redirectErrorStream(true).start();
