@@ -21,6 +21,7 @@ import java.awt.event.MouseEvent;
 class ShattersOverlayWindow extends JWindow {
 
     private boolean calibrating;
+    private static volatile boolean nativeMapModeLogged;
     private Point dragStart;
     private Rectangle dragBounds;
     private int dragMode; // 0 none, 1 move, 2 resize
@@ -52,14 +53,97 @@ class ShattersOverlayWindow extends JWindow {
     private boolean wanted;
 
     private final Timer attachTimer = new Timer(300, e -> attach());
+    private int macForegroundMisses;
+    private long macConfiguredPeer;
+    private long macLastClickThroughCheck;
+    private long macLastOrderFront;
 
     private void attach() {
         boolean want = wanted && gameIsInFront();
-        if (want != isVisible()) super.setVisible(want);
+        if (MacOSNative.isMac()) {
+            if (want) {
+                macForegroundMisses = 0;
+            } else if (wanted && isVisible()) {
+                // CoreGraphics can briefly omit a window while Spaces/full-screen transitions
+                // settle. Require three consecutive misses before hiding, otherwise the
+                // overlay flashes off/on during the transition.
+                want = ++macForegroundMisses < 3;
+            } else {
+                macForegroundMisses = 0;
+            }
+        }
+        if (want != isVisible()) {
+            // Hide/show the peer without changing 'wanted': this timer must remember that
+            // the overlay is enabled while Exalt moves between Spaces.
+            super.setVisible(want);
+            if (want) {
+                if (MacOSNative.isMac()) refreshMacNativeWindowState(true);
+                else applyWindowStyles();
+                ShattersRadar.setDrawingMap(wantsLive());
+            }
+        }
+        if (MacOSNative.isMac()) {
+            if (want) {
+                if (!inputTimer.isRunning()) inputTimer.start();
+                if (!syncTimer.isRunning()) syncTimer.start();
+            } else {
+                inputTimer.stop();
+                syncTimer.stop();
+            }
+        }
         if (want) {
+            // A zero native handle means "not available yet", not a click-through reset.
+            // The native state helper is cheap when the peer and its properties are unchanged.
+            if (MacOSNative.isMac()) refreshMacNativeWindowState(false);
             followGameWindow();
             startFrames();
             watchGameMenu();
+        }
+    }
+
+    /**
+     * Applies native styling only after a real NSWindow exists. The NSWindow pointer is cached
+     * as an identity token: a recreated AWT peer is configured once, while the 300 ms foreground
+     * poll only verifies click-through occasionally. This avoids retry spam and AppKit churn.
+     */
+    private void refreshMacNativeWindowState(boolean force) {
+        if (!MacOSNative.isMac() || !isVisible() || !isDisplayable() || !isShowing()) return;
+        long handle = MacOSNative.nativeWindowHandle(this);
+        if (handle == 0L) {
+            // Forget the old identity: AWT may have destroyed the peer during a Space change.
+            // When a native peer returns it must receive the full style configuration again.
+            macConfiguredPeer = 0L;
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        if (force || handle != macConfiguredPeer) {
+            if (!MacOSNative.configureOverlayWindow(this)) return;
+            MacOSNative.orderOverlayFront(this);
+            setClickThrough(!calibrating);
+            macConfiguredPeer = handle;
+            macLastClickThroughCheck = now;
+            Boolean verified = MacOSNative.clickThroughState(this);
+            if (verified == null || verified.booleanValue() != !calibrating) {
+                System.err.println("[mac] overlay native peer is available, but click-through could not be verified");
+            }
+            return;
+        }
+
+        if (now - macLastClickThroughCheck >= 2500L) {
+            Boolean actual = MacOSNative.clickThroughState(this);
+            macLastClickThroughCheck = now;
+            if (actual != null && actual.booleanValue() != !calibrating) {
+                // Only repair a known, existing NSWindow whose native flag really changed.
+                setClickThrough(!calibrating);
+            }
+        }
+        if (now - macLastOrderFront >= 2500L) {
+            // Unity can raise its main NSWindow again after a Space/full-screen transition.
+            // Reorder only (never restyle) the already-configured transparent, click-through
+            // panel so it remains above the game without causing compositing flicker.
+            MacOSNative.orderOverlayFront(this);
+            macLastOrderFront = now;
         }
     }
 
@@ -109,21 +193,49 @@ class ShattersOverlayWindow extends JWindow {
 
     ShattersOverlayWindow() {
         try {
+            GraphicsDevice device = GraphicsEnvironment.getLocalGraphicsEnvironment().getDefaultScreenDevice();
+            boolean perPixel = device.isWindowTranslucencySupported(
+                    GraphicsDevice.WindowTranslucency.PERPIXEL_TRANSLUCENT);
+            System.err.println("[mac] overlay per-pixel translucency supported=" + perPixel);
             setBackground(new Color(0, 0, 0, 0));
         } catch (Throwable e) {
-            // per-pixel translucency unsupported; the window falls back to opaque
+            // Do not silently pretend this is transparent: MacOSNative also configures the
+            // backing NSWindow after addNotify, and this message identifies an AWT-side issue.
+            System.err.println("[mac] AWT transparent overlay background failed: " + e);
         }
         setAlwaysOnTop(true);
         setFocusableWindowState(false);
+        setAutoRequestFocus(false);
         setBounds(loadBounds());
+
+        // Every layer in the Swing hierarchy must be non-opaque for a per-pixel
+        // transparent NSWindow. JWindow's default root/layered panes can otherwise leave
+        // their dark default background behind the custom content component.
+        getRootPane().setOpaque(false);
+        getRootPane().setBackground(new Color(0, 0, 0, 0));
+        getLayeredPane().setOpaque(false);
+        getLayeredPane().setBackground(new Color(0, 0, 0, 0));
 
         JComponent content = new JComponent() {
             @Override
-            protected void paintComponent(Graphics g) {
-                paintOverlay((Graphics2D) g.create());
+            protected void paintComponent(Graphics graphics) {
+                Graphics2D g = (Graphics2D) graphics.create();
+                try {
+                    // Clear the previous backing-store pixels before drawing this frame.
+                    // Without this, the old Swing backing image can remain as a solid/dark
+                    // rectangle even though the NSWindow itself reports opaque=false.
+                    g.setComposite(java.awt.AlphaComposite.Clear);
+                    g.fillRect(0, 0, getWidth(), getHeight());
+                    g.setComposite(java.awt.AlphaComposite.SrcOver);
+                    paintOverlay(g);
+                } finally {
+                    g.dispose();
+                }
             }
         };
         content.setOpaque(false);
+        content.setBackground(new Color(0, 0, 0, 0));
+        content.setDoubleBuffered(false);
         setContentPane(content);
 
         MouseAdapter drag = new MouseAdapter() {
@@ -175,9 +287,14 @@ class ShattersOverlayWindow extends JWindow {
         ShattersRadar.setDrawingMap(drawMap);
         // the window styles are NOT set here: they need a native window to set them on, and
         // there is not one until the peer is made. See addNotify.
-        repaintTimer.start();
-        inputTimer.start();
-        syncTimer.start();
+        if (MacOSNative.isMac()) {
+            // macOS: avoid idle global polling/capture when this overlay is not wanted.
+        } else {
+            // Preserve the established Windows timer lifecycle.
+            repaintTimer.start();
+            inputTimer.start();
+            syncTimer.start();
+        }
         MouseWheelWatch.start(new MouseWheelWatch.Listener() {
             @Override
             public void wheel(int x, int y, int notches) {
@@ -228,7 +345,7 @@ class ShattersOverlayWindow extends JWindow {
      * back, and only when it is worth believing.
      */
     private void syncToGame() {
-        if (!wantsLive() || syncing || calibrating) return;
+        if ((MacOSNative.isMac() && (!wanted || !isVisible())) || !wantsLive() || syncing || calibrating) return;
         // Whoever last set the zoom by hand keeps it.
         //
         // Measuring the game's zoom is for starting in step with it, not for overruling
@@ -250,8 +367,12 @@ class ShattersOverlayWindow extends JWindow {
                 // the same photograph, or a fresh one if the measurement stopped short of taking
                 // it, tells the colour of every icon the game is drawing under a mark of ours
                 java.awt.image.BufferedImage shot = MinimapSync.lastShot;
-                if (shot == null) shot = MinimapSync.photograph();
-                learnIconColours(shot, MinimapSync.lastWhere);
+                // If zoom matching stopped before taking a picture, only take a separate
+                // minimap photograph when there is actually a foe icon whose colour can
+                // be learned. Otherwise an empty/early realm caused an unnecessary full
+                // game-window capture every five seconds.
+                if (shot == null && (!MacOSNative.isMac() || hasFoeIconToLearn())) shot = MinimapSync.photograph();
+                if (shot != null) learnIconColours(shot, MinimapSync.lastWhere);
             } catch (Throwable ignored) {
                 // a measurement that throws is a measurement that did not happen
             } finally {
@@ -288,24 +409,17 @@ class ShattersOverlayWindow extends JWindow {
     }
 
     /**
-     * Where the window styles are actually applied.
-     * <p>
-     * They used to be applied in the constructor, which cannot work and quietly did not: both
-     * need a native window handle, there is no native window until the peer is made, and
-     * {@code Native.getWindowID} throws on a window that is not displayable yet. The throw was
-     * caught and ignored as a nicety that had failed, so the overlay ran its whole life with
-     * <b>click-through never switched on</b> - and the one thing it absolutely had to do was
-     * let a click reach the game.
-     * <p>
-     * It looked like it was working. The game draws its own tooltip when the pointer is over a
-     * player on the minimap, because it reads the pointer's position from the system rather
-     * than from the messages the window receives - so hovering behaved exactly as it should
-     * while every actual click was being eaten by a transparent window on top.
+     * Creates the AWT peer. Native AppKit styling and click-through are applied after
+     * {@link #setVisible(boolean)} has created and shown the NSWindow.
      */
     @Override
     public void addNotify() {
         super.addNotify();
-        applyWindowStyles();
+        if (MacOSNative.isMac()) {
+            // On macOS the peer's CPlatformWindow may not have an NSWindow pointer until
+            // the current AWT event has completed. Defer configuration to the next EDT turn.
+            SwingUtilities.invokeLater(() -> refreshMacNativeWindowState(true));
+        }
     }
 
     @Override
@@ -313,16 +427,26 @@ class ShattersOverlayWindow extends JWindow {
         wanted = show;
         super.setVisible(show);
         if (show) {
-            applyWindowStyles();
+            if (MacOSNative.isMac()) refreshMacNativeWindowState(true);
+            else applyWindowStyles();
             ShattersRadar.setDrawingMap(wantsLive());
+            if (MacOSNative.isMac()) {
+                inputTimer.start();
+                syncTimer.start();
+            }
             attachTimer.start();
         } else {
             attachTimer.stop();
+            if (MacOSNative.isMac()) {
+                inputTimer.stop();
+                syncTimer.stop();
+            }
         }
     }
 
     private void applyWindowStyles() {
-        setClickThrough(!calibrating);
+        if (!MacOSNative.isMac()) setClickThrough(!calibrating);
+        else refreshMacNativeWindowState(true);
     }
 
     private void paintOverlay(Graphics2D g) {
@@ -392,8 +516,17 @@ class ShattersOverlayWindow extends JWindow {
             return;
         }
         double[] me = ShattersRadar.playerFromView(tilesWide, tilesHigh);
-        boolean drewMap = paintMap(g, w, h, tilesWide, tilesHigh);
-        paintLayoutNotice(g, w, h);
+        // On macOS the game already renders its own minimap. Draw Sonar's live marks over
+        // that native minimap instead of painting a second, nearly-opaque replacement map.
+        // This keeps the game's terrain, roads, icons, and unexplored areas visible and avoids
+        // a doubled map when Sonar's inferred zoom differs from the game's current zoom.
+        boolean nativeGameMap = usesNativeGameMinimap();
+        if (nativeGameMap && !nativeMapModeLogged) {
+            nativeMapModeLogged = true;
+            System.err.println("[mac] native game-minimap pass-through active: drawing Sonar annotations only");
+        }
+        boolean drewMap = nativeGameMap ? false : paintMap(g, w, h, tilesWide, tilesHigh);
+        if (!nativeGameMap) paintLayoutNotice(g, w, h);
         paintLive(g, w, h, tilesWide, tilesHigh);
         // An overlay that draws nothing and says nothing is indistinguishable from one that is
         // not running. Every blank frame here has a reason and the reason is known at the
@@ -404,8 +537,10 @@ class ShattersOverlayWindow extends JWindow {
         // case that most needed explaining: a realm with marks all over it and no ground
         // underneath them. The marks proved the overlay was alive, so the absence of ground
         // looked deliberate, and the panel that knew why refused to speak.
-        if (!drewMap) paintWhyBlank(g, w, h);
-        else paintGroundLine(g, w, h);
+        if (!nativeGameMap) {
+            if (!drewMap) paintWhyBlank(g, w, h);
+            else paintGroundLine(g, w, h);
+        }
         if (calibrating) {
             g.setColor(new Color(255, 255, 255, 50));
             g.drawOval((int) (cx - radius), (int) (cy - radius), (int) (radius * 2), (int) (radius * 2));
@@ -669,6 +804,13 @@ class ShattersOverlayWindow extends JWindow {
      * Reads off the game's minimap the colour it draws each marked enemy in, so the ring around
      * that enemy's sprite is the same colour as the game's own icon for it.
      */
+    private boolean hasFoeIconToLearn() {
+        for (ShattersRadar.Mark mark : ShattersRadar.live()) {
+            if (mark.type == ShattersRadar.FOE && mark.piece != null) return true;
+        }
+        return false;
+    }
+
     private void learnIconColours(java.awt.image.BufferedImage shot, Rectangle where) {
         if (shot == null || where == null) return;
         Rectangle me = getBounds();
@@ -745,7 +887,21 @@ class ShattersOverlayWindow extends JWindow {
 
     /** Whether the radar needs to keep the live census at all: for the map, or for the enemies alone. */
     private boolean wantsLive() {
-        return drawMap || enemiesOnly;
+        // In macOS pass-through mode the original Exalt minimap is the base layer, but Sonar
+        // still needs the live entity census to draw player, enemy, portal, and target markers.
+        return drawMap || enemiesOnly || usesNativeGameMinimap();
+    }
+
+    /**
+     * macOS default: keep Exalt's own minimap visible and draw Sonar's live annotations only.
+     * Set sonar.shatters.useOriginalGameMinimap=false in sonar.properties to opt back into
+     * Sonar's replacement map (the Windows/default behavior).
+     */
+    private static boolean usesNativeGameMinimap() {
+        // On macOS the user's original minimap is always the base layer. Do not let a
+        // stale preference from an earlier replacement-map experiment switch the opaque
+        // Sonar terrain renderer back on; Windows keeps its existing replacement-map mode.
+        return MacOSNative.isMac();
     }
 
     /**
@@ -811,7 +967,7 @@ class ShattersOverlayWindow extends JWindow {
      * to nothing when you zoom out is no use at the moment you most want it.
      */
     private void paintLive(Graphics2D g, int w, int h, double tilesWide, double tilesHigh) {
-        if (!drawMap) return;
+        if (!drawMap && !usesNativeGameMinimap()) return;
         dotPx = dotFor(w, h);
         double cx = w / 2.0, cy = h / 2.0;
         java.util.List<ShattersRadar.Mark> marks = ShattersRadar.live(), beacons = new java.util.ArrayList<>();
@@ -2422,7 +2578,8 @@ class ShattersOverlayWindow extends JWindow {
             MinimapPlacement.learn(getBounds());
         }
         calibrating = on;
-        setClickThrough(!on);
+        if (MacOSNative.isMac()) refreshMacNativeWindowState(true);
+        else setClickThrough(!on);
         repaint();
     }
 
@@ -2699,6 +2856,11 @@ class ShattersOverlayWindow extends JWindow {
         MinimapSync.forgetWhere();      // the minimap has moved with the window
         lastFix = p.how();
         rehome(p.rect);
+        if (MacOSNative.isMac() && isVisible()) {
+            // A geometry/Space move may recreate the native peer; compare its identity and
+            // configure only when the NSWindow instance actually changed.
+            refreshMacNativeWindowState(false);
+        }
         repaint();
     }
 
@@ -3147,8 +3309,13 @@ class ShattersOverlayWindow extends JWindow {
      */
     private void setClickThrough(boolean through) {
         if (MacOSNative.isMac()) {
+            if (!isDisplayable() || !isShowing() || MacOSNative.nativeWindowHandle(this) == 0L) {
+                clickThroughOn = false;
+                styleTrouble = "macOS native window peer not ready";
+                return;
+            }
             clickThroughOn = MacOSNative.setClickThrough(this, through);
-            styleTrouble = clickThroughOn == through ? "" : "macOS did not confirm NSWindow click-through; check Java runtime permissions/module access";
+            styleTrouble = clickThroughOn == through ? "" : "macOS did not confirm NSWindow click-through; inspect native peer diagnostics";
             return;
         }
         try {

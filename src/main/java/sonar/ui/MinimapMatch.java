@@ -238,4 +238,53 @@ final class MinimapMatch {
         if (nextBest >= Double.MAX_VALUE) return 1;
         return nextBest / won;
     }
+
+    /**
+     * Confidence for the live minimap measurement.
+     *
+     * The live search calculates a different map centre for each zoom candidate,
+     * because the game's minimap shifts at map boundaries. Confidence must use
+     * that same rule; holding the winner's centre fixed gives alternatives an
+     * unfair advantage or disadvantage.
+     */
+    static double confidenceLive(BufferedImage shot, BufferedImage mine,
+                                  double[] candidates, double winner) {
+        if (shot == null || mine == null || winner <= 0
+                || candidates == null || candidates.length == 0) {
+            return Double.MAX_VALUE;
+        }
+
+        double[] winningCentre = ShattersRadar.viewCentre(
+                shot.getWidth() / winner, shot.getHeight() / winner);
+        if (winningCentre == null) return 1;
+
+        double won = disagreementAt(
+                shot, mine, winningCentre[0], winningCentre[1], winner);
+
+        if (won >= Double.MAX_VALUE || won <= 0) {
+            return won <= 0 ? Double.MAX_VALUE : 1;
+        }
+
+        double nextBest = Double.MAX_VALUE;
+
+        for (double c : candidates) {
+            if (c <= 0) continue;
+
+            // Ignore the winner and its immediate neighbouring scales.
+            if (Math.abs(c - winner) / winner < 0.2) continue;
+
+            double[] centre = ShattersRadar.viewCentre(
+                    shot.getWidth() / c, shot.getHeight() / c);
+            if (centre == null) continue;
+
+            double score = disagreementAt(
+                    shot, mine, centre[0], centre[1], c);
+
+            if (score < nextBest) nextBest = score;
+        }
+
+        if (nextBest >= Double.MAX_VALUE) return 1;
+        return nextBest / won;
+    }
+
 }

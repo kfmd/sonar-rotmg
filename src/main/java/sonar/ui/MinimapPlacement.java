@@ -225,7 +225,10 @@ final class MinimapPlacement {
 
     /** Keeps where the minimap is in the game's picture now, found or placed by hand, for predicting it at other sizes. */
     static void learn(Rectangle minimap) {
-        Client c = client();
+        learn(minimap, client());
+    }
+
+    private static void learn(Rectangle minimap, Client c) {
         if (c == null || minimap == null) return;
         double[] f = fitOf(c.logical, minimap);
         if (!plausible(f)) return;
@@ -262,7 +265,15 @@ final class MinimapPlacement {
     private static long changedAt, nextTry;
     private static int tries, serial;
     private static boolean pending;
+    private static boolean macSearchRunning;
     private static Placement last;
+
+    private static final java.util.concurrent.ExecutorService MAC_FINDER =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "sonar-macos-minimap-placement");
+                t.setDaemon(true);
+                return t;
+            });
 
     /**
      * Where the minimap is now, looked for again whenever the game's picture moves or changes
@@ -274,7 +285,7 @@ final class MinimapPlacement {
         if (c == null) return last;
         long now = System.currentTimeMillis();
         if (!c.logical.equals(tracked)) {
-            tracked = c.logical;
+            tracked = new Rectangle(c.logical);
             changedAt = now;
             tries = 0;
             nextTry = 0;
@@ -282,6 +293,19 @@ final class MinimapPlacement {
             return last;
         }
         if (!pending || now - changedAt < SETTLE_MS || now < nextTry) return last;
+
+        if (MacOSNative.isMac()) {
+            // The full-window capture and colour scan can be expensive. Never run them from
+            // the Swing attach timer; use one serial worker and publish only a current result.
+            if (!macSearchRunning) {
+                macSearchRunning = true;
+                Client target = c;
+                MAC_FINDER.execute(() -> findMacPlacement(target));
+            }
+            return last;
+        }
+
+        // Keep the established Windows path and its timing unchanged.
         Rectangle found = MinimapLocator.findOn(c);
         if (found != null) {
             pending = false;
@@ -297,6 +321,43 @@ final class MinimapPlacement {
         }
         return last;
     }
+
+    private static void findMacPlacement(Client target) {
+        Rectangle found = null;
+        try {
+            found = MinimapLocator.findOn(target);
+        } catch (Throwable failure) {
+            System.err.println("[mac] minimap placement search failed: " + failure);
+        }
+
+        boolean learned = false;
+        synchronized (MinimapPlacement.class) {
+            macSearchRunning = false;
+            // Discard a result from a window that moved/resized while it was being captured.
+            Client latest = client();
+            if (tracked == null || !tracked.equals(target.logical)
+                    || latest == null || !latest.logical.equals(target.logical)) return;
+            long now = System.currentTimeMillis();
+            if (found != null) {
+                pending = false;
+                tries = 0;
+                nextTry = 0;
+                place(found, true, target);
+                learned = true;
+            } else {
+                tries++;
+                nextTry = now + Math.min(30_000L, 1000L << Math.min(5, tries));
+                if (tries >= 6) pending = false;
+                double[] fit = savedFit();
+                if (tries == 2 && fit != null
+                        && (last == null || !target.logical.equals(last.client.logical))) {
+                    place(predict(target.logical, fit), false, target);
+                }
+            }
+        }
+        if (learned) learn(found, target);
+    }
+
 
     private static Placement place(Rectangle r, boolean found, Client c) {
         last = new Placement(r, found, c, ++serial);

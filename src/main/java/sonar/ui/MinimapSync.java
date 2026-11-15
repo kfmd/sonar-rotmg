@@ -40,6 +40,13 @@ final class MinimapSync {
     private MinimapSync() {
     }
 
+    private static void resetWeakConsensus() {
+        weakCandidateRung = 0;
+        weakCandidateCount = 0;
+        weakCandidateAt = 0;
+        weakCandidateWhere = null;
+    }
+
     /**
      * How much clearer the winner has to be than the next candidate to be acted on.
      * <p>
@@ -56,6 +63,14 @@ final class MinimapSync {
     private static volatile double lastScale;
     private static volatile double lastConfidence;
     private static volatile long lastAt;
+
+    // Weak image matches are accepted only after repeated, spatially stable agreement on the
+    // same discrete game zoom rung. This avoids rejecting a real rung forever in repetitive
+    // terrain while preventing one ambiguous screenshot from moving boss/player markers.
+    private static double weakCandidateRung;
+    private static int weakCandidateCount;
+    private static long weakCandidateAt;
+    private static Rectangle weakCandidateWhere;
 
     /** What the last measurement concluded, for the overlay's readout. */
     static String state() {
@@ -112,15 +127,18 @@ final class MinimapSync {
         BufferedImage mine = MinimapView.copyOwn();
         if (mine == null || MinimapView.fromWire() < ENOUGH_GROUND) {
             state = "too little ground drawn to match yet";
+            resetWeakConsensus();
             return 0;
         }
         if (frameW <= 0 || frameH <= 0 || candidates == null || candidates.length == 0) {
             state = "no frame to match in";
+            resetWeakConsensus();
             return 0;
         }
         Rectangle where = whereItIs();
         if (where == null) {
             state = "minimap not found: " + MinimapLocator.trouble();
+            resetWeakConsensus();
             return 0;
         }
         BufferedImage shot = MinimapLocator.pictureOf(where);
@@ -128,31 +146,115 @@ final class MinimapSync {
         lastWhere = where;
         if (shot == null) {
             state = "could not photograph the minimap";
+            resetWeakConsensus();
             return 0;
         }
         dumpForDebugging(shot, mine, where);
+
+        // The screenshot is in device pixels (CoreGraphics returns 2x pixels on a Retina
+        // display), while the overlay bounds and zoom ladder are in Java logical points.
+        // MinimapMatch works in screenshot pixels, so comparing its result directly with the
+        // logical-pixel ladder rejects valid zooms and leaves boss/player markers at the wrong
+        // scale. Convert the candidate ladder into capture pixels for matching, then convert
+        // the selected rung back to logical points before returning it to the overlay.
+        double ratioX = shot.getWidth() / (double) Math.max(1, where.width);
+        double ratioY = shot.getHeight() / (double) Math.max(1, where.height);
+        if (!Double.isFinite(ratioX) || !Double.isFinite(ratioY)
+                || ratioX <= 0 || ratioY <= 0
+                || Math.abs(ratioX - ratioY) / Math.max(ratioX, ratioY) > 0.05) {
+            state = String.format(java.util.Locale.ROOT,
+                    "capture scale is inconsistent (%.3fx%.3f)", ratioX, ratioY);
+            resetWeakConsensus();
+            return 0;
+        }
+        double captureRatio = (ratioX + ratioY) / 2.0;
+        double[] captureCandidates = new double[candidates.length];
+        for (int i = 0; i < candidates.length; i++) {
+            captureCandidates[i] = candidates[i] * captureRatio;
+        }
+
         // The ladder says where the game's zoom ought to be; the sweep finds where it is.
         // Measuring only at the rungs meant a ladder worked out wrongly for this window - and
         // it has been, more than once - could never be contradicted by the screen it was
         // meant to be read from. Two percent steps from half the lowest rung to half again
         // above the highest is two hundred-odd scales, a few milliseconds off the interface
         // thread.
-        double[] sweep = sweepAround(candidates);
-        double scale = MinimapMatch.bestScaleLive(shot, mine, shot.getWidth(), shot.getHeight(), sweep);
-        if (scale <= 0) {
+        double[] sweep = sweepAround(captureCandidates);
+        double captureScale = MinimapMatch.bestScaleLive(
+                shot, mine, shot.getWidth(), shot.getHeight(), sweep);
+        if (captureScale <= 0) {
             state = "nothing matched";
+            resetWeakConsensus();
             return 0;
         }
-        double[] centre = ShattersRadar.viewCentre(shot.getWidth() / scale, shot.getHeight() / scale);
+        double[] centre = ShattersRadar.viewCentre(
+                shot.getWidth() / captureScale, shot.getHeight() / captureScale);
         if (centre == null) {
             state = "not placed on the map yet";
+            resetWeakConsensus();
             return 0;
         }
-        double sure = MinimapMatch.confidence(shot, mine, centre[0], centre[1], sweep, scale);
-        lastScale = scale;
+        // Use the same scale-dependent map-centre calculation as bestScaleLive().
+        double sure = MinimapMatch.confidenceLive(
+                shot, mine, sweep, captureScale);
+        double logicalScale = captureScale / captureRatio;
+        lastScale = logicalScale;
         lastConfidence = sure;
-        if (sure < SURE_ENOUGH) {
-            state = String.format("no clear match (%.2fx)", sure);
+
+        // A screenshot can make the best scale only modestly clearer than alternatives when
+        // the explored terrain is repetitive. The game's zoom is discrete, however: a measured
+        // scale very close to one of its actual rungs is independent corroboration. Permit a
+        // lower confidence only when the measurement is within 4% of a known rung; do not relax
+        // the rule for arbitrary in-between values.
+        double rungCapture = 0, off = Double.MAX_VALUE;
+        for (double c : captureCandidates) {
+            double d = Math.abs(c - captureScale) / c;
+            if (d < off) {
+                off = d;
+                rungCapture = c;
+            }
+        }
+        boolean corroboratedRung = rungCapture > 0 && off <= 0.04;
+        boolean strongMatch = sure >= SURE_ENOUGH;
+        boolean moderateRungMatch = sure >= 1.0 && corroboratedRung;
+
+        // Preserve the previous rectangle for diagnostics before updating/resetting consensus.
+        Rectangle previousWhere = weakCandidateWhere == null
+                ? null : new Rectangle(weakCandidateWhere);
+
+        boolean sameRung = false;
+        boolean sameFrame = false;
+        boolean recent = false;
+
+        if (moderateRungMatch) {
+            double rungLogicalCandidate = rungCapture / captureRatio;
+            sameRung = weakCandidateRung > 0
+                    && Math.abs(rungLogicalCandidate - weakCandidateRung)
+                       / Math.max(rungLogicalCandidate, weakCandidateRung) <= 0.015;
+            sameFrame = weakCandidateWhere != null
+                    && weakCandidateWhere.equals(where);
+            recent = weakCandidateAt > 0
+                    && lastAt - weakCandidateAt <= 60000L;
+
+            weakCandidateCount = sameRung && sameFrame && recent
+                    ? weakCandidateCount + 1 : 1;
+
+            weakCandidateRung = rungLogicalCandidate;
+            weakCandidateWhere = new Rectangle(where);
+            weakCandidateAt = lastAt;
+        } else {
+            resetWeakConsensus();
+        }
+        boolean repeatedWeakMatch = moderateRungMatch && weakCandidateCount >= 3;
+        if (!strongMatch && !(sure >= 1.15 && corroboratedRung) && !repeatedWeakMatch) {
+            state = String.format(java.util.Locale.ROOT,
+                    "tentative match (%.2fx; nearest rung %.2f logical px/tile, %.1f%% off; "
+                    + "stable captures %d/3 [eligible=%s, same rung=%s, same frame=%s, "
+                    + "recent=%s, previous=%s, current=%s]; capture %.2f at %.2fx)",
+                    sure, rungCapture / captureRatio, off * 100,
+                    moderateRungMatch ? weakCandidateCount : 0,
+                    moderateRungMatch, sameRung, sameFrame, recent,
+                    previousWhere, where, captureScale, captureRatio);
             return 0;
         }
         // The game's zoom is only ever one of its rungs. A measurement that is sure but lands
@@ -163,20 +265,19 @@ final class MinimapSync {
         // alongside the game's own key is what keeps the two in register. The measurement is
         // for the case the ladder cannot cover - an overlay opened partway through, at a
         // zoom nobody saw being set.
-        double rung = 0, off = Double.MAX_VALUE;
-        for (double c : candidates) {
-            double d = Math.abs(c - scale) / c;
-            if (d < off) {
-                off = d;
-                rung = c;
-            }
-        }
-        if (rung <= 0 || off > 0.15) {
-            state = String.format("%.2f is not a zoom the game has (%.2fx sure)", scale, sure);
+        if (rungCapture <= 0 || off > 0.15) {
+            state = String.format(java.util.Locale.ROOT,
+                    "%.2f logical px/tile is not a zoom the game has (%.2fx sure; capture %.2f at %.2fx)",
+                    logicalScale, sure, captureScale, captureRatio);
             return 0;
         }
-        state = String.format("locked on %.2f, %.2fx clearer than the next", rung, sure);
-        return rung;
+        double rungLogical = rungCapture / captureRatio;
+        if (strongMatch || sure >= 1.15) resetWeakConsensus();
+        state = String.format(java.util.Locale.ROOT,
+                "locked on %.2f logical px/tile, %.2fx clearer%s (capture %.2f at %.2fx)",
+                rungLogical, sure, repeatedWeakMatch ? " after 3 consistent captures" : "",
+                captureScale, captureRatio);
+        return rungLogical;
     }
 
     private static int dumped;
