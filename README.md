@@ -1,3 +1,10 @@
+# Note for macOS
+
+- Tested and debugged on Macbook Pro M4 Pro Golden Gate 27.2
+- Works pretty good and consistently Right now
+- Not guaranteed to work in your mac tho
+- Use at your own risk
+
 # Sonar
 
 > **On Windows, Sonar requires [Npcap](https://npcap.com/).** It is the free Windows driver that lets a program read network traffic, and no packet sniffer on Windows works without it. Its licence forbids anyone bundling it, so it is a separate install — the Sonar installer checks for it and points you at it, but you can get it out of the way [first](#install). The macOS preview uses Apple's system `libpcap` and BPF devices instead.
